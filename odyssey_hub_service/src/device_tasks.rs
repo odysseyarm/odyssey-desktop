@@ -1,72 +1,59 @@
-extern crate ats_usb;
-extern crate hidapi;
-
-use std::{convert::Infallible, net::{Ipv4Addr, SocketAddr}, time::Duration};
-
-use iced::{
-    futures::{Sink, SinkExt}, widget::{column, text, Column}
-};
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::{self, Sender};
+use tokio::io::Sink;
 
-fn main() -> iced::Result {
-    iced::program("kajingo", Counter::update, Counter::view)
-        .subscription(|_| {
-            println!("subscription outer!");
-            iced::subscription::channel(0, 4, |sender| {
-                println!("subscription inner!");
-                device_ping_task(sender)
-            })
-        })
-        .subscription(|_| {
-            println!("subscription outer!");
-            iced::subscription::channel(1, 4, |sender| {
-                println!("subscription inner!");
-                device_hid_task(sender)
-            })
-        })
-        .subscription(|_| {
-            println!("subscription outer!");
-            iced::subscription::channel(2, 4, |sender| {
-                println!("subscription inner!");
-                device_cdc_task(sender)
-            })
-        })
-        .run()
+#[derive(Debug, Clone, Copy)]
+enum Device {
+    Udp(SocketAddr),
+    Hid,
+    Cdc,
 }
 
-#[derive(Default)]
-struct Counter {
-    device_list: Vec<SocketAddr>,
+impl PartialEq for Device {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Device::Udp(a), Device::Udp(b)) => a == b,
+            (Device::Hid, Device::Hid) => true,
+            (Device::Cdc, Device::Cdc) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Message {
-    Connect(SocketAddr),
-    Disconnect(SocketAddr),
+    Connect(Device),
+    Disconnect(Device),
 }
 
-impl Counter {
-    pub fn view(&self) -> Column<Message> {
-        let mut col = column![text("hello there")];
-        for d in &self.device_list {
-            col = col.push(text(d));
-        }
-        col
-    }
-    pub fn update(&mut self, message: Message) {
-        match message {
-            Message::Connect(a) => self.device_list.push(a),
-            Message::Disconnect(a) => {
-                let i = self.device_list.iter().position(|d| *d == a);
-                if let Some(i) = i {
-                    self.device_list.remove(i);
+async fn device_tasks() -> anyhow::Result<()> {
+    let (sender, mut receiver) = mpsc::channel(12);
+    let mut device_list = vec![];
+    tokio::select! {
+        _ = device_ping_task(sender.clone()) => {},
+        _ = device_hid_task(sender.clone()) => {},
+        _ = device_cdc_task(sender.clone()) => {},
+        _ = async {
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    Message::Connect(d) => {
+                        device_list.push(d);
+                    },
+                    Message::Disconnect(d) => {
+                        let i = device_list.iter().position(|a| *a == d);
+                        if let Some(i) = i {
+                            device_list.remove(i);
+                        }
+                    },
                 }
-            },
-        }
+            }
+        } => {},
     }
+    Ok(())
 }
 
-async fn device_ping_task(mut message_channel: impl Sink<Message> + Unpin) -> Infallible {
+async fn device_ping_task(mut message_channel: Sender<Message>) -> std::convert::Infallible {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 23456)).await.unwrap();
     socket.set_broadcast(true).unwrap();
 
@@ -76,15 +63,15 @@ async fn device_ping_task(mut message_channel: impl Sink<Message> + Unpin) -> In
         let mut buf = [0; 1472];
         socket.send_to(&[255, 1], ("10.0.0.255", 23456)).await.unwrap();
         futures::future::select(
-            std::pin::pin!(tokio::time::sleep(Duration::from_secs(2))),
+            std::pin::pin!(tokio::time::sleep(tokio::time::Duration::from_secs(2))),
             std::pin::pin!(async {
                 loop {
                     let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
                     if buf[0] == 255 { continue; }
-                    if !old_list.contains(&addr) {
-                        let _ = message_channel.send(Message::Connect(addr)).await;
+                    if !old_list.contains(&Device::Udp(addr)) {
+                        let _ = message_channel.send(Message::Connect(Device::Udp(addr))).await;
                     }
-                    new_list.push(addr);
+                    new_list.push(Device::Udp(addr));
                 }
             })
         ).await;
@@ -98,7 +85,7 @@ async fn device_ping_task(mut message_channel: impl Sink<Message> + Unpin) -> In
     }
 }
 
-async fn device_hid_task(mut message_channel: impl Sink<Message> + Unpin) -> Infallible {
+async fn device_hid_task(mut message_channel: Sender<Message>) -> std::convert::Infallible {
     let api = hidapi::HidApi::new().unwrap();
 
     let mut old_list = vec![];
@@ -106,7 +93,10 @@ async fn device_hid_task(mut message_channel: impl Sink<Message> + Unpin) -> Inf
         let mut new_list = vec![];
         for device in api.device_list() {
             if device.vendor_id() == 0x1915 && device.product_id() == 0x48AB {
-                new_list.push(SocketAddr::new(Ipv4Addr::new(42, 0, 0, 1).into(), 00000));
+                if !old_list.contains(&Device::Hid) {
+                    let _ = message_channel.send(Message::Connect(Device::Hid)).await;
+                }
+                new_list.push(Device::Hid);
             }
         }
         dbg!(&new_list);
@@ -116,11 +106,11 @@ async fn device_hid_task(mut message_channel: impl Sink<Message> + Unpin) -> Inf
             }
         }
         old_list = new_list;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 }
 
-async fn device_cdc_task(mut message_channel: impl Sink<Message> + Unpin) -> Infallible {
+async fn device_cdc_task(mut message_channel: Sender<Message>) -> std::convert::Infallible {
     let mut old_list = vec![];
     loop {
         let mut new_list = vec![];
@@ -129,7 +119,7 @@ async fn device_cdc_task(mut message_channel: impl Sink<Message> + Unpin) -> Inf
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Failed to list serial ports {}", &e.to_string());
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 continue;
             }
         }.into_iter().filter(|port| {
@@ -152,7 +142,10 @@ async fn device_cdc_task(mut message_channel: impl Sink<Message> + Unpin) -> Inf
             }
         }).collect();
         for device in ports {
-            new_list.push(SocketAddr::new(Ipv4Addr::new(42, 0, 0, 1).into(), 00000));
+            if !old_list.contains(&Device::Cdc) {
+                let _ = message_channel.send(Message::Connect(Device::Cdc)).await;
+            }
+            new_list.push(Device::Cdc);
         }
         dbg!(&new_list);
         for v in &old_list {
@@ -161,6 +154,6 @@ async fn device_cdc_task(mut message_channel: impl Sink<Message> + Unpin) -> Inf
             }
         }
         old_list = new_list;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 }
