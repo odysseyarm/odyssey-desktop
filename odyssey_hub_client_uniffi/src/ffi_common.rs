@@ -1,5 +1,3 @@
-use interoptopus::{ffi_type, pattern::option::Option, pattern::string::String};
-
 #[macro_export]
 macro_rules! impl_from_simple {
     ($from:path => $to:ty, $($field:ident),+) => {
@@ -15,54 +13,62 @@ macro_rules! impl_from_simple {
     };
 }
 
-#[ffi_type]
-#[derive(Clone)]
-pub enum Device {
-    Udp(UdpDevice),
-    Hid(HidDevice),
-    Cdc(CdcDevice),
+#[derive(uniffi::Object)]
+pub struct Device {
+    pub record: DeviceRecord,
 }
 
-#[ffi_type]
-#[derive(Clone)]
-pub struct UdpDevice {
-    pub id: u8,
-    pub addr: String, // e.g., "192.168.0.1:1234"
-    pub uuid: u64,
+#[uniffi::export]
+impl Device {
+    #[uniffi::constructor]
+    pub fn new(record: DeviceRecord) -> Self {
+        Self { record }
+    }
 }
 
-#[ffi_type]
+#[derive(uniffi::Enum)]
 #[derive(Clone)]
-pub struct HidDevice {
-    pub path: String,
-    pub uuid: u64,
+pub enum DeviceRecord {
+    Udp {
+        uuid: u64,
+        id: u8,
+        addr: String, // e.g., "192.168.0.1:1234"
+    },
+    Hid {
+        uuid: u64,
+        path: String,
+    },
+    Cdc {
+        uuid: u64,
+        path: String,
+    },
 }
 
-#[ffi_type]
-#[derive(Clone)]
-pub struct CdcDevice {
-    pub path: String,
-    pub uuid: u64,
+#[uniffi::export]
+impl Device {
+    pub fn uuid(&self) -> u64 {
+        match self.record {
+            DeviceRecord::Udp { uuid, .. } => uuid,
+            DeviceRecord::Hid { uuid, .. } => uuid,
+            DeviceRecord::Cdc { uuid, .. } => uuid,
+        }
+    }
 }
 
-#[ffi_type]
+#[derive(uniffi::Enum)]
 #[derive(Clone)]
-pub struct Event {
-    pub kind: EventKind,
-}
-
-#[ffi_type]
-#[derive(Clone)]
-pub enum EventKind {
-    None,
+pub enum Event {
     DeviceEvent(DeviceEvent),
 }
 
-#[ffi_type]
+#[derive(uniffi::Record)]
 #[derive(Clone)]
-pub struct DeviceEvent(Device, DeviceEventKind);
+pub struct DeviceEvent {
+    device: DeviceRecord,
+    kind: DeviceEventKind,
+}
 
-#[ffi_type]
+#[derive(uniffi::Enum)]
 #[derive(Clone)]
 pub enum DeviceEventKind {
     AccelerometerEvent(AccelerometerEvent),
@@ -75,7 +81,7 @@ pub enum DeviceEventKind {
     PacketEvent(PacketEvent),
 }
 
-#[ffi_type]
+#[derive(uniffi::Record)]
 #[derive(Clone)]
 pub struct AccelerometerEvent {
     pub timestamp: u32,
@@ -84,7 +90,7 @@ pub struct AccelerometerEvent {
     pub euler_angles: crate::funny::Vector3f32,
 }
 
-#[ffi_type]
+#[derive(uniffi::Record)]
 #[derive(Clone)]
 pub struct TrackingEvent {
     pub timestamp: u32,
@@ -94,41 +100,41 @@ pub struct TrackingEvent {
     pub screen_id: u32,
 }
 
-#[ffi_type]
+#[derive(uniffi::Record)]
 #[derive(Clone)]
 pub struct ImpactEvent {
     pub timestamp: u32,
 }
 
-#[ffi_type]
+#[derive(uniffi::Record)]
 #[derive(Clone)]
 pub struct PacketEvent {
     pub ty: u8,
     pub data: PacketData,
 }
 
-#[ffi_type]
+#[derive(uniffi::Enum)]
 #[derive(Clone)]
 pub enum PacketData {
     Unsupported,
     VendorEvent(VendorEventPacketData),
 }
 
-#[ffi_type]
+#[derive(uniffi::Record)]
 #[derive(Clone)]
 pub struct VendorEventPacketData {
     pub len: u8,
-    pub data: [u8; 98],
+    pub data: Vec<u8>,
 }
 
-#[ffi_type]
+#[derive(uniffi::Record)]
 #[derive(Clone, Default)]
 pub struct Pose {
     pub rotation: crate::funny::Matrix3f32,
     pub translation: crate::funny::Matrix3x1f32,
 }
 
-#[ffi_type]
+#[derive(uniffi::Object)]
 #[derive(Clone)]
 pub struct ScreenInfo {
     pub id: u8,
@@ -175,7 +181,7 @@ impl From<ats_usb::packets::vm::PacketData> for PacketData {
             ats_usb::packets::vm::PacketData::Vendor(_, (len, data)) => PacketData::VendorEvent(
                 VendorEventPacketData {
                     len,
-                    data,
+                    data: data.to_vec(),
                 }
             ),
             _ => PacketData::Unsupported,
@@ -183,46 +189,46 @@ impl From<ats_usb::packets::vm::PacketData> for PacketData {
     }
 }
 
-impl From<odyssey_hub_common::device::Device> for Device {
+impl From<odyssey_hub_common::device::Device> for DeviceRecord {
     fn from(device: odyssey_hub_common::device::Device) -> Self {
         match device {
-            odyssey_hub_common::device::Device::Udp(d) => Device::Udp(UdpDevice {
+            odyssey_hub_common::device::Device::Udp(d) => DeviceRecord::Udp {
+                uuid: d.uuid,
                 id: d.id,
                 addr: d.addr.to_string().into(),
+            },
+            odyssey_hub_common::device::Device::Hid(d) => DeviceRecord::Hid {
                 uuid: d.uuid,
-            }),
-            odyssey_hub_common::device::Device::Hid(d) => Device::Hid(HidDevice {
                 path: d.path.into(),
+            },
+            odyssey_hub_common::device::Device::Cdc(d) => DeviceRecord::Cdc {
                 uuid: d.uuid,
-            }),
-            odyssey_hub_common::device::Device::Cdc(d) => Device::Cdc(CdcDevice {
                 path: d.path.into(),
-                uuid: d.uuid,
-            }),
+            },
         }
     }
 }
 
-impl From<Device> for odyssey_hub_common::device::Device {
-    fn from(device: Device) -> Self {
+impl From<DeviceRecord> for odyssey_hub_common::device::Device {
+    fn from(device: DeviceRecord) -> Self {
         match device {
-            Device::Udp(d) => odyssey_hub_common::device::Device::Udp(
+            DeviceRecord::Udp { uuid, id, addr } => odyssey_hub_common::device::Device::Udp(
                 odyssey_hub_common::device::UdpDevice {
-                    id: d.id,
-                    addr: d.addr.into_string().parse().unwrap(),
-                    uuid: d.uuid,
+                    uuid,
+                    id,
+                    addr: addr.to_string().parse().unwrap(),
                 },
             ),
-            Device::Hid(d) => odyssey_hub_common::device::Device::Hid(
+            DeviceRecord::Hid { path, uuid } => odyssey_hub_common::device::Device::Hid(
                 odyssey_hub_common::device::HidDevice {
-                    path: d.path.into(),
-                    uuid: d.uuid,
+                    uuid,
+                    path: path.into(),
                 },
             ),
-            Device::Cdc(d) => odyssey_hub_common::device::Device::Cdc(
+            DeviceRecord::Cdc { path, uuid } => odyssey_hub_common::device::Device::Cdc(
                 odyssey_hub_common::device::CdcDevice {
-                    path: d.path.into(),
-                    uuid: d.uuid,
+                    uuid,
+                    path: path.into(),
                 },
             ),
         }
@@ -232,13 +238,10 @@ impl From<Device> for odyssey_hub_common::device::Device {
 impl From<odyssey_hub_common::events::Event> for Event {
     fn from(event: odyssey_hub_common::events::Event) -> Self {
         match event {
-            odyssey_hub_common::events::Event::None => Event {
-                kind: EventKind::None,
-            },
-            odyssey_hub_common::events::Event::DeviceEvent(de) => Event {
-                kind: EventKind::DeviceEvent(DeviceEvent {
-                    device: de.device.into(),
-                    kind: match de.kind {
+            odyssey_hub_common::events::Event::DeviceEvent(odyssey_hub_common::events::DeviceEvent(d, evt)) => Event::DeviceEvent(
+                DeviceEvent {
+                    device: d.into(),
+                    kind: match evt {
                         odyssey_hub_common::events::DeviceEventKind::AccelerometerEvent(e) => {
                             DeviceEventKind::AccelerometerEvent(e.into())
                         }
@@ -276,8 +279,8 @@ impl From<odyssey_hub_common::events::Event> for Event {
                             })
                         }
                     },
-                }),
-            },
+                },
+            ),
         }
     }
 }
